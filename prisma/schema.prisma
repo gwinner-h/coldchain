@@ -1,0 +1,214 @@
+// Vista CRM database schema (Azure SQL / SQL Server).
+// Prisma does not support enums on SQL Server, so status/role columns are strings
+// validated against the unions in src/domain/types.ts.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlserver"
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  email     String   @unique @db.NVarChar(200)
+  name      String   @db.NVarChar(100)
+  role      String   @db.VarChar(20)
+  active    Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  ownedAccounts      Account[]     @relation("AccountOwner")
+  ownedOpportunities Opportunity[] @relation("OpportunityOwner")
+  activities         Activity[]
+  stageChanges       StageChange[]
+}
+
+model Account {
+  id                  Int      @id @default(autoincrement())
+  name                String   @db.NVarChar(60)
+  type                String   @db.VarChar(30)
+  phone               String?  @db.NVarChar(30)
+  website             String?  @db.NVarChar(200)
+  street              String?  @db.NVarChar(60)
+  city                String?  @db.NVarChar(30)
+  state               String?  @db.Char(2)
+  zip                 String?  @db.NVarChar(12)
+  vistaCustomerNumber Int?
+  ownerId             Int?
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  owner         User?         @relation("AccountOwner", fields: [ownerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  contacts      Contact[]
+  opportunities Opportunity[]
+  activities    Activity[]
+
+  @@index([name])
+  @@index([vistaCustomerNumber])
+}
+
+model Contact {
+  id        Int      @id @default(autoincrement())
+  accountId Int
+  firstName String   @db.NVarChar(40)
+  lastName  String   @db.NVarChar(40)
+  title     String?  @db.NVarChar(60)
+  email     String?  @db.NVarChar(200)
+  phone     String?  @db.NVarChar(30)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  account    Account    @relation(fields: [accountId], references: [id])
+  activities Activity[]
+
+  @@index([accountId])
+}
+
+model Opportunity {
+  id                    Int       @id @default(autoincrement())
+  name                  String    @db.NVarChar(60)
+  accountId             Int
+  stage                 String    @db.VarChar(4)
+  estimatedValue        Decimal?  @db.Decimal(14, 2)
+  marketSector          String?   @db.NVarChar(60)
+  projectType           String?   @db.NVarChar(20)
+  deliveryMethod        String?   @db.NVarChar(40)
+  city                  String?   @db.NVarChar(30)
+  state                 String?   @db.Char(2)
+  bidDueDate            DateTime? @db.Date
+  expectedAwardDate     DateTime? @db.Date
+  description           String?   @db.NVarChar(2000)
+  ownerId               Int
+  estimatorCode         String?   @db.NVarChar(20)
+  closedReason          String?   @db.NVarChar(200)
+  vistaPotentialProject String?   @db.NVarChar(20)
+  vistaSyncStatus       String    @default("NOT_REQUIRED") @db.VarChar(20)
+  vistaLastSyncedAt     DateTime?
+  version               Int       @default(1)
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  account      Account         @relation(fields: [accountId], references: [id])
+  owner        User            @relation("OpportunityOwner", fields: [ownerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  stageChanges StageChange[]
+  activities   Activity[]
+  outbox       OutboxMessage[]
+
+  @@index([stage])
+  @@index([accountId])
+  @@index([ownerId])
+}
+
+model StageChange {
+  id            Int      @id @default(autoincrement())
+  opportunityId Int
+  fromStage     String?  @db.VarChar(4)
+  toStage       String   @db.VarChar(4)
+  changedById   Int
+  changedAt     DateTime @default(now())
+
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id])
+  changedBy   User        @relation(fields: [changedById], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([opportunityId])
+}
+
+model Activity {
+  id            Int       @id @default(autoincrement())
+  type          String    @db.VarChar(20)
+  subject       String    @db.NVarChar(200)
+  notes         String?   @db.NVarChar(4000)
+  occurredAt    DateTime
+  dueAt         DateTime?
+  completedAt   DateTime?
+  opportunityId Int?
+  accountId     Int?
+  contactId     Int?
+  ownerId       Int
+  source        String    @default("MANUAL") @db.VarChar(10)
+  externalId    String?   @db.NVarChar(400)
+  createdAt     DateTime  @default(now())
+
+  opportunity Opportunity? @relation(fields: [opportunityId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  account     Account?     @relation(fields: [accountId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  contact     Contact?     @relation(fields: [contactId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  owner       User         @relation(fields: [ownerId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([opportunityId])
+  @@index([accountId])
+  @@index([ownerId, dueAt])
+  @@index([externalId])
+}
+
+model OutboxMessage {
+  id            Int       @id @default(autoincrement())
+  opportunityId Int
+  operation     String    @db.VarChar(40)
+  payload       String    @db.NVarChar(Max)
+  status        String    @db.VarChar(20)
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime  @default(now())
+  lockedUntil   DateTime?
+  lockToken     String?   @db.VarChar(64)
+  lastError     String?   @db.NVarChar(2000)
+  lastErrorCode String?   @db.NVarChar(100)
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  completedAt   DateTime?
+
+  opportunity Opportunity @relation(fields: [opportunityId], references: [id])
+
+  @@index([status, nextAttemptAt])
+  @@index([opportunityId])
+}
+
+model IntegrationEvent {
+  id            Int      @id @default(autoincrement())
+  direction     String   @db.VarChar(10)
+  kind          String   @db.VarChar(60)
+  status        String   @db.VarChar(10)
+  message       String   @db.NVarChar(2000)
+  outboxId      Int?
+  opportunityId Int?
+  createdAt     DateTime @default(now())
+
+  @@index([createdAt])
+}
+
+model VistaCustomer {
+  customerNumber Int      @id
+  name           String   @db.NVarChar(60)
+  city           String?  @db.NVarChar(30)
+  state          String?  @db.NVarChar(4)
+  active         Boolean  @default(true)
+  syncedAt       DateTime
+
+  @@index([name])
+}
+
+model VistaJob {
+  company          Int
+  job              String    @db.NVarChar(10)
+  description      String    @db.NVarChar(60)
+  customerNumber   Int?
+  status           String    @db.NVarChar(20)
+  contractAmount   Decimal?  @db.Decimal(14, 2)
+  billedToDate     Decimal?  @db.Decimal(14, 2)
+  startDate        DateTime? @db.Date
+  potentialProject String?   @db.NVarChar(20)
+  syncedAt         DateTime
+
+  @@id([company, job])
+  @@index([customerNumber])
+}
+
+model Lookup {
+  kind        String  @db.VarChar(20)
+  code        String  @db.NVarChar(20)
+  description String  @db.NVarChar(60)
+  active      Boolean @default(true)
+
+  @@id([kind, code])
+}

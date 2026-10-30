@@ -1,0 +1,17 @@
+# Local SQL Server for development. Matches Azure SQL closely enough for day-to-day work.
+#   docker compose up -d
+#   docker compose exec sqlserver /opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P 'Local_Dev_Passw0rd!' -Q "CREATE DATABASE crm"
+#   npm run db:migrate -- --name init
+services:
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "Local_Dev_Passw0rd!"
+      MSSQL_PID: Developer
+    ports:
+      - "1433:1433"
+    volumes:
+      - sqlserver-data:/var/opt/mssql
+volumes:
+  sqlserver-data:

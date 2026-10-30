@@ -1,0 +1,250 @@
+openapi: 3.1.0
+info:
+  title: CRM integration API (for Trimble App Xchange)
+  version: 0.1.0
+  description: |
+    Called only by App Xchange flows through the HTTP connector. The CRM owns
+    retries, ordering and error visibility; flows stay thin.
+
+    Outbound (CRM -> Vista), on a schedule (e.g. every 2 minutes):
+      1. POST /api/integration/outbox/claim
+      2. For each message, call the Vista connector action
+         Pre-Construction > Potential Projects > Add (CREATE_POTENTIAL_PROJECT)
+         or Change (UPDATE_POTENTIAL_PROJECT), passing `payload` as-is.
+         If payload.customer.mode is "create", create the AR customer first.
+      3. POST /api/integration/outbox/{id}/result with the outcome.
+
+    Inbound (Vista -> CRM), on Vista cache events or a schedule:
+      POST /api/integration/vista/customers | jobs | lookups
+
+    Every request sends the connection's API key as `x-api-key` (or
+    `Authorization: Bearer <key>`), matching INTEGRATION_API_KEY.
+servers:
+  - url: https://YOUR-CRM-HOST
+security:
+  - apiKey: []
+paths:
+  /api/integration/outbox/claim:
+    post:
+      summary: Claim messages that are due for delivery to Vista
+      description: |
+        Returns at most one message per opportunity, oldest first. Each claimed
+        message is locked for 5 minutes; if no result arrives in time it is
+        handed out again. Report results with the returned lockToken.
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                limit: { type: integer, minimum: 1, maximum: 50, default: 10 }
+      responses:
+        "200":
+          description: Claimed messages (possibly empty)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages]
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/ClaimedMessage" }
+        "401": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /api/integration/outbox/{id}/result:
+    post:
+      summary: Report the outcome of one delivery
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: integer } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              oneOf:
+                - type: object
+                  required: [success, lockToken, potentialProject]
+                  properties:
+                    success: { const: true }
+                    lockToken: { type: string }
+                    potentialProject:
+                      type: string
+                      maxLength: 20
+                      description: Potential project code as stored in Vista
+                    customerNumber:
+                      type: integer
+                      description: AR customer number, when the flow created a new customer
+                - type: object
+                  required: [success, lockToken, error]
+                  properties:
+                    success: { const: false }
+                    lockToken: { type: string }
+                    error:
+                      type: object
+                      required: [code, message, retryable]
+                      properties:
+                        code: { type: string, example: VISTA_VALIDATION }
+                        message: { type: string }
+                        retryable:
+                          type: boolean
+                          description: |
+                            false for errors a retry can't fix (Vista rejected a value):
+                            the message stops and shows on the Vista sync screen.
+                            true for timeouts and outages: retried with backoff, up to 8 attempts.
+      responses:
+        "200":
+          description: Recorded
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, enum: [SUCCEEDED, FAILED, DEAD] }
+                  nextAttemptAt: { type: [string, "null"], format: date-time }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409":
+          description: The lock expired and the message was reclaimed, or it already completed. Discard this result.
+  /api/integration/vista/customers:
+    post:
+      summary: Upsert Vista AR customers (the account picker's source)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rows]
+              properties:
+                rows:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [customerNumber, name]
+                    properties:
+                      customerNumber: { type: integer }
+                      name: { type: string, maxLength: 60 }
+                      city: { type: [string, "null"] }
+                      state: { type: [string, "null"] }
+                      active: { type: boolean, default: true }
+      responses:
+        "200": { description: "{ received: number }" }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/integration/vista/jobs:
+    post:
+      summary: Upsert Vista JC jobs (read-only history on accounts). Jobs starting before 2020 are skipped.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rows]
+              properties:
+                rows:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [company, job, status]
+                    properties:
+                      company: { type: integer, example: 9 }
+                      job: { type: string, maxLength: 10 }
+                      description: { type: string, maxLength: 60 }
+                      customerNumber: { type: [integer, "null"] }
+                      status: { type: string }
+                      contractAmount: { type: [number, "null"] }
+                      billedToDate: { type: [number, "null"] }
+                      startDate: { type: [string, "null"], format: date }
+                      potentialProject: { type: [string, "null"], maxLength: 20 }
+      responses:
+        "200": { description: Counts of rows received and kept }
+        "400": { $ref: "#/components/responses/Error" }
+  /api/integration/vista/lookups:
+    post:
+      summary: Upsert pick lists synced from Vista, so codes are chosen, never typed
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [rows]
+              properties:
+                rows:
+                  type: array
+                  maxItems: 1000
+                  items:
+                    type: object
+                    required: [kind, code, description]
+                    properties:
+                      kind: { type: string, enum: [PROJECT_TYPE, ESTIMATOR, MARKET_SECTOR] }
+                      code: { type: string, maxLength: 20 }
+                      description: { type: string, maxLength: 60 }
+                      active: { type: boolean, default: true }
+      responses:
+        "200": { description: "{ received: number }" }
+        "400": { $ref: "#/components/responses/Error" }
+components:
+  securitySchemes:
+    apiKey: { type: apiKey, in: header, name: x-api-key }
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema:
+            type: object
+            properties:
+              error:
+                type: object
+                properties:
+                  code: { type: string }
+                  message: { type: string }
+                  details: {}
+  schemas:
+    ClaimedMessage:
+      type: object
+      required: [id, lockToken, operation, opportunityId, attempt, payload]
+      properties:
+        id: { type: integer }
+        lockToken: { type: string }
+        operation: { type: string, enum: [CREATE_POTENTIAL_PROJECT, UPDATE_POTENTIAL_PROJECT] }
+        opportunityId: { type: integer }
+        attempt: { type: integer }
+        payload: { $ref: "#/components/schemas/VistaPotentialProject" }
+    VistaPotentialProject:
+      description: |
+        Built by src/integration/vista/mapping.ts. Property names are ASSUMED;
+        confirm against the Vista connector's Potential Projects action schema.
+      type: object
+      properties:
+        JCCo: { type: integer, example: 9 }
+        PotentialProject: { type: string, maxLength: 20, example: CRM000042 }
+        Description: { type: string, maxLength: 60 }
+        Status: { type: string, enum: [Budget, Proposal, Pending, Awarded, Lost, Cancelled, Inactive] }
+        ProjectType: { type: [string, "null"] }
+        City: { type: [string, "null"] }
+        State: { type: [string, "null"] }
+        EstimatedValue: { type: [number, "null"] }
+        BidDueDate: { type: [string, "null"], format: date }
+        Estimator: { type: [string, "null"] }
+        Notes: { type: [string, "null"] }
+        ud_CRMId: { type: integer }
+        customer:
+          oneOf:
+            - type: object
+              properties:
+                mode: { const: existing }
+                Customer: { type: integer }
+            - type: object
+              properties:
+                mode: { const: create }
+                Name: { type: string }
+                Address: { type: string }
+                City: { type: string }
+                State: { type: string }
+                Zip: { type: string }
+                Phone: { type: [string, "null"] }
